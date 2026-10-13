@@ -16,6 +16,7 @@ struct User: Codable {
     var bmi: Double?
     var bmiCategory: String?
     var scanStorageConsent: Bool?
+    var scanAiSharingConsent: Bool?
 }
 
 struct ProfileInput: Encodable {
@@ -149,7 +150,9 @@ struct ChatMessage: Codable, Identifiable {
 }
 
 struct ChatReply: Codable { var reply: String; var cards: [Card] }
-struct ChatInput: Encodable { var message: String }
+/// One NDJSON line from POST /chat/stream.
+struct ChatEvent: Decodable { var type: String; var text: String?; var reply: String?; var cards: [Card]?; var detail: String? }
+struct ChatInput: Encodable { var message: String; var imageJpegBase64: String? = nil; var conversationId: String? = nil }
 struct OK: Codable { var ok: Bool }
 struct VisualizeSession: Codable { var sessionToken: String; var expiresAt: String }
 struct ScanMetric: Codable { var identifier: String; var value: Double; var unit: String }
@@ -160,7 +163,7 @@ struct ScanInput: Encodable {
     var source = "visualize_sdk"
     var metrics: [ScanMetric]
 }
-struct ConsentInput: Encodable { var scanStorageConsent: Bool }
+struct ConsentInput: Encodable { var scanStorageConsent: Bool? = nil; var scanAiSharingConsent: Bool? = nil }
 
 // MARK: Cards
 

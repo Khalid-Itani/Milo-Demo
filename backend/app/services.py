@@ -196,13 +196,13 @@ def patch_set(s, id, body):
 
 
 def log_set(s, body):
-    # No active session: edit the most recently finished one (fixing a workout after Finish).
+    # Explicit session_id may be a finished session (fixing a workout after Finish).
     session = (get(s, WorkoutSession, body.session_id) if body.session_id else
-               s.exec(owned(WorkoutSession).where(WorkoutSession.status == "active")).first() or
-               s.exec(owned(WorkoutSession).where(WorkoutSession.status == "completed")
-                      .order_by(WorkoutSession.finished_at.desc())).first())
-    if session is None or session.status not in ("active", "completed"):
-        raise HTTPException(409, "Ask the user to start the intended workout")
+               s.exec(owned(WorkoutSession).where(WorkoutSession.status == "active")).first())
+    if session is None:
+        raise HTTPException(409, "No active session: call start_workout for the intended workout, or pass session_id to edit a finished one")
+    if session.status not in ("active", "completed"):
+        raise HTTPException(409, "Start the intended workout first")
     matches = [e for e in exercises(s, session.workout_id) if
                (e.id == body.exercise_id if body.exercise_id else e.name.casefold() == body.exercise_name.casefold())]
     if len(matches) != 1:

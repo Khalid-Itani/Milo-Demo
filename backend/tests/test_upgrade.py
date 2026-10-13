@@ -386,10 +386,64 @@ def test_coach_edits_finished_session(c, monkeypatch):
     w = c.get("/workouts").json()[-1]
     sid = c.post(f"/workouts/{w['id']}/start").json()["session_id"]
     c.post(f"/workouts/{w['id']}/finish")
-    # No active session: the tool falls back to the most recently finished one.
+    # Editing a finished session names it explicitly.
     mock_turn(monkeypatch, [("get_recent_sessions", {}),
-                            ("log_workout_set", {"exercise_name": "Bench Press", "kg": 55, "reps": 8, "set_index": 0})])
+                            ("log_workout_set", {"exercise_name": "Bench Press", "kg": 55, "reps": 8, "set_index": 0,
+                                                 "session_id": sid})])
     card = c.post("/chat", json={"message": "Fix my bench: first set was 55 kg x 8"}).json()["cards"][0]
     assert card["type"] == "set_logged" and card["data"]["session_id"] == sid
     first = c.get(f"/sessions/{sid}").json()["exercises"][0]["sets"][0]
     assert (first["kg"], first["reps"], first["done"]) == (55, 8, True)
+
+
+def test_meal_photo_reaches_claude_but_is_not_stored(c, monkeypatch):
+    img = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAg="  # tiny fake JPEG header, base64
+    seen = mock_turn(monkeypatch, [("log_food", {"meal": "lunch", "name": "Salmon bowl", "quantity": "1 bowl",
+                                                 "kcal": 650, "protein_g": 40, "carbs_g": 60, "fat_g": 22})])
+    r = c.post("/chat", json={"message": "[Photo] Log what I ate", "image_jpeg_base64": img}).json()
+    assert r["cards"][0]["type"] == "food_logged"
+    first_call = seen[0]["messages"][-1]["content"]
+    assert first_call[0]["type"] == "image" and first_call[0]["source"]["data"] == img
+    history = c.get("/chat/history").json()
+    assert all(img not in str(m) for m in history)
+
+
+def test_chat_stream_sends_text_status_and_done(c, monkeypatch):
+    turns = iter([
+        NS(stop_reason="tool_use", content=[NS(type="text", text="Let me log that."),
+            NS(type="tool_use", id="t0", name="log_food", input={"meal": "snack", "name": "Apple", "quantity": "1",
+                                                                  "kcal": 95, "protein_g": 0, "carbs_g": 25, "fat_g": 0})]),
+        NS(stop_reason="end_turn", content=[NS(type="text", text="Logged an apple.")]),
+    ])
+    def respond(on_text=None, **kwargs):
+        turn = next(turns)
+        for b in turn.content:
+            if b.type == "text" and on_text:
+                for word in b.text.split(" "):
+                    on_text(word + " ")
+        return turn
+    monkeypatch.setattr(coach, "create_message", respond)
+    r = c.post("/chat/stream", json={"message": "I ate an apple"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/x-ndjson")
+    events = [json.loads(line) for line in r.text.splitlines() if line]
+    kinds = [e["type"] for e in events]
+    assert kinds.count("text") >= 4 and "status" in kinds and kinds[-1] == "done"
+    assert kinds.index("status") < len(kinds) - 1 and events[kinds.index("status")]["text"] == "Logging food…"
+    assert events[-1]["reply"] == "Logged an apple." and events[-1]["cards"][0]["type"] == "food_logged"
+    c.headers.pop("Authorization", None)
+    assert c.post("/chat/stream", json={"message": "hi"}).status_code == 401
+
+
+def test_coach_starts_workout_before_logging(c, monkeypatch):
+    w = c.get("/workouts").json()[-1]
+    assert w["status"] != "active"
+    mock_turn(monkeypatch, [("start_workout", {"workout_id": w["id"]}),
+                            ("log_workout_set", {"exercise_name": "Bench Press", "kg": 70, "reps": 10})])
+    card = c.post("/chat", json={"message": "Just did bench 70 kg for 10"}).json()["cards"][0]
+    assert card["type"] == "set_logged" and card["data"]["kg"] == 70
+    now = c.get(f"/workouts/{w['id']}").json()
+    assert now["status"] == "active" and now["exercises"][0]["sets"][0]["reps"] == 10
+    # Without a started workout, logging alone is refused with guidance.
+    c.post(f"/workouts/{w['id']}/finish")
+    mock_turn(monkeypatch, [("log_workout_set", {"exercise_name": "Bench Press", "kg": 70, "reps": 10})])
+    assert c.post("/chat", json={"message": "bench 70x10"}).json()["cards"] == []

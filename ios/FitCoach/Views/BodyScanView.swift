@@ -69,6 +69,15 @@ struct BodyScanButton: View {
                     }
                 }
             }
+            Toggle(isOn: Binding(get: { store.profile?.scanAiSharingConsent == true },
+                                 set: { on in Task { await store.setScanAISharing(on) } })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Let Milo use my scans").font(Theme.text(14.5, .semibold))
+                    Text("Milo sees your latest scan results when planning diet and training.")
+                        .font(Theme.text(12)).foregroundStyle(Theme.secondary)
+                }
+            }
+            .tint(Theme.train)
             Button { showHistory = true } label: {
                 HStack {
                     Image(systemName: "chart.line.uptrend.xyaxis")

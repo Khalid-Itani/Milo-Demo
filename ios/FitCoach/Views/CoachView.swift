@@ -1,21 +1,39 @@
+import PhotosUI
 import SwiftUI
 
 struct CoachView: View {
     @Environment(AppStore.self) private var store
     @FocusState private var focused: Bool
+    @State private var photoItem: PhotosPickerItem?
+    @State private var photo: UIImage?
+    @State private var confirmNewChat = false
     private let suggestions = ["Plan tonight’s dinner", "Swap an exercise", "How was my week?"]
 
     var body: some View {
         @Bindable var store = store
         VStack(spacing: 0) {
             HStack {
+                if focused {
+                    // The keyboard hides the tab bar; this closes it so you can navigate away.
+                    Button { focused = false } label: {
+                        Label("Back", systemImage: "chevron.left").font(Theme.text(15, .semibold))
+                            .frame(minHeight: 44)
+                    }
+                    .accessibilityLabel("Close keyboard")
+                }
                 ScreenTitle(title: "Coach")
                 Spacer()
                 // ponytail: past chats / new chat are visual only in the MVP.
                 Button {} label: { Image(systemName: "clock.arrow.circlepath").frame(width: 44, height: 44) }
                     .accessibilityLabel("Past chats")
-                Button {} label: { Image(systemName: "square.and.pencil").frame(width: 44, height: 44) }
+                Button { confirmNewChat = true } label: { Image(systemName: "square.and.pencil").frame(width: 44, height: 44) }
                     .accessibilityLabel("New chat")
+                    .disabled(store.isSending)
+                    .confirmationDialog("Start a new chat?", isPresented: $confirmNewChat, titleVisibility: .visible) {
+                        Button("New chat") { store.newChat() }
+                    } message: {
+                        Text("Clears this conversation. Your logged food, workouts, goals and scans are kept.")
+                    }
             }
             .font(.system(size: 18))
             .foregroundStyle(Theme.ink)
@@ -25,7 +43,10 @@ struct CoachView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(store.chat) { MessageView(message: $0) }
-                        if store.isSending {
+                        if let status = store.chatStatus {
+                            Label(status, systemImage: "sparkles").font(Theme.text(13.5, .medium)).foregroundStyle(Theme.secondary)
+                                .symbolEffect(.pulse)
+                        } else if store.isSending && (store.chat.last?.content.isEmpty ?? true) {
                             Image(systemName: "ellipsis")
                                 .font(.system(size: 22, weight: .bold)).foregroundStyle(Theme.secondary)
                                 .symbolEffect(.variableColor.iterative)
@@ -38,6 +59,7 @@ struct CoachView: View {
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: store.chat.count) { withAnimation { proxy.scrollTo("bottom") } }
                 .onChange(of: store.isSending) { withAnimation { proxy.scrollTo("bottom") } }
+                .onChange(of: store.chat.last?.content) { proxy.scrollTo("bottom") }
                 .onAppear { proxy.scrollTo("bottom") }
             }
 
@@ -65,11 +87,34 @@ struct CoachView: View {
                 }
                 .padding(.horizontal, 12)
             }
+            if let photo {
+                HStack {
+                    Image(uiImage: photo).resizable().scaledToFill()
+                        .frame(width: 64, height: 64).clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(alignment: .topTrailing) {
+                            Button { self.photo = nil; photoItem = nil } label: {
+                                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                                    .frame(width: 22, height: 22).background(Theme.ink, in: Circle())
+                            }
+                            .offset(x: 6, y: -6)
+                            .accessibilityLabel("Remove photo")
+                        }
+                    Text("Milo will log what's in the photo. Add a note if you like.")
+                        .font(Theme.text(12.5)).foregroundStyle(Theme.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+            }
             HStack(spacing: 4) {
-                Button {} label: {
+                PhotosPicker(selection: $photoItem, matching: .images) {
                     Image(systemName: "plus").frame(width: 40, height: 40).background(Theme.trainTrack, in: Circle())
                 }
-                .accessibilityLabel("Add photo or barcode")
+                .accessibilityLabel("Add a meal photo")
+                .onChange(of: photoItem) {
+                    Task {
+                        if let data = try? await photoItem?.loadTransferable(type: Data.self) { photo = UIImage(data: data) }
+                    }
+                }
                 TextField("Ask, log a meal, plan a workout", text: draft, axis: .vertical)
                     .font(Theme.text(15)).lineLimit(1...4)
                     .padding(.horizontal, 6)
@@ -83,7 +128,7 @@ struct CoachView: View {
                         .frame(width: 40, height: 40).background(Theme.ink, in: Circle())
                 }
                 .accessibilityLabel("Send")
-                .disabled(store.isSending || draft.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(store.isSending || (photo == nil && draft.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty))
             }
             .foregroundStyle(Theme.ink)
             .padding(6)
@@ -97,9 +142,11 @@ struct CoachView: View {
     }
 
     private func submit() {
-        let text = store.coachDraft
+        let text = store.coachDraft, image = photo
         store.coachDraft = ""
-        Task { await store.send(text) }
+        photo = nil
+        photoItem = nil
+        Task { await store.send(text, photo: image) }
     }
 }
 
@@ -117,12 +164,16 @@ private struct MessageView: View {
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 if !message.content.isEmpty {
-                    // Milo replies can contain inline markdown (**bold**); keep line breaks for lists.
-                    Text((try? AttributedString(markdown: message.content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(message.content))
+                    // Milo is asked for plain text; render stray inline markdown, or strip it if parsing fails.
+                    Text((try? AttributedString(markdown: message.content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                         ?? AttributedString(message.content.replacingOccurrences(of: "**", with: "")))
                         .font(Theme.text(15)).lineSpacing(4).foregroundStyle(Theme.ink)
                 }
-                ForEach(Array((message.cards ?? []).enumerated()), id: \.offset) { _, card in
-                    CardView(card: card)
+                ForEach(Array(grouped(message.cards ?? []).enumerated()), id: \.offset) { _, item in
+                    switch item {
+                    case .card(let card): CardView(card: card)
+                    case .sets(let sets): SetsCardView(sets: sets)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -131,6 +182,77 @@ private struct MessageView: View {
 }
 
 // MARK: Cards
+
+/// All set cards in one reply collapse into a single card with a row per exercise.
+private enum DisplayCard { case card(Card), sets([SetCard]) }
+
+private func grouped(_ cards: [Card]) -> [DisplayCard] {
+    var out: [DisplayCard] = []
+    var setsAt: Int?
+    for card in cards {
+        guard case .setLogged(let set) = card else { out.append(.card(card)); continue }
+        if let i = setsAt, case .sets(var sets) = out[i] {
+            sets.append(set)
+            out[i] = .sets(sets)
+        } else {
+            setsAt = out.count
+            out.append(.sets([set]))
+        }
+    }
+    return out
+}
+
+private struct SetsCardView: View {
+    var sets: [SetCard]
+
+    /// Exercises in first-logged order, each with its sets.
+    private var exercises: [(name: String, sets: [SetCard])] {
+        var order: [String] = []
+        var byName: [String: [SetCard]] = [:]
+        for set in sets {
+            if byName[set.exercise] == nil { order.append(set.exercise) }
+            byName[set.exercise, default: []].append(set)
+        }
+        return order.map { ($0, byName[$0]!) }
+    }
+
+    private func summary(_ sets: [SetCard]) -> String {
+        let first = sets[0]
+        if sets.allSatisfy({ $0.kg == first.kg && $0.reps == first.reps }) {
+            let weight = first.kg > 0 ? " @ \(fmt(first.kg)) kg" : ""
+            return sets.count == 1 ? "\(first.reps) reps\(weight)" : "\(sets.count) × \(first.reps)\(weight)"
+        }
+        return sets.map { "\(fmt($0.kg))×\($0.reps)" }.joined(separator: " · ")
+    }
+
+    var body: some View {
+        CardShell {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.ink)
+                        .frame(width: 32, height: 32).background(Theme.train, in: RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(sets.count == 1 ? "Set logged" : "\(sets.count) sets logged")
+                            .font(Theme.text(12, .semibold)).foregroundStyle(Theme.secondary)
+                        Text(exercises.count == 1 ? exercises[0].name : "\(exercises.count) exercises")
+                            .font(Theme.text(14, .semibold))
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 14).padding(.vertical, 12)
+                ForEach(exercises, id: \.name) { ex in
+                    Divider().overlay(Theme.hairline)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(ex.name).font(Theme.text(14))
+                        Spacer(minLength: 12)
+                        Text(summary(ex.sets)).font(Theme.mono(13)).multilineTextAlignment(.trailing)
+                    }
+                    .padding(.horizontal, 14).frame(minHeight: 40)
+                }
+            }
+        }
+    }
+}
 
 private struct CardView: View {
     var card: Card
@@ -187,14 +309,10 @@ private struct PlanCardView: View {
                     .padding(.horizontal, 14).padding(.vertical, 9)
                 }
                 Divider().overlay(Theme.hairline)
-                HStack(spacing: 8) {
-                    // The plan is already saved by the tool call; this just jumps to Train.
-                    Button("Save to Train") { store.trainPath = []; store.selectedTab = .train }
-                        .buttonStyle(BigButtonStyle())
-                    Button("Adjust") { store.coachDraft = "Adjust the plan: " }
-                        .buttonStyle(BigButtonStyle(bg: .white, fg: Theme.ink, border: Theme.border))
-                }
-                .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 14)
+                // The tool call already saved the plan; the button confirms it and then links to Train.
+                SaveRow(save: "Save to Train", view: "View in Train",
+                        open: { store.trainPath = []; store.selectedTab = .train },
+                        secondary: ("Adjust", { store.coachDraft = "Adjust the plan: " }))
             }
         }
     }
@@ -237,6 +355,7 @@ private struct FoodCardView: View {
 }
 
 private struct DietCardView: View {
+    @Environment(AppStore.self) private var store
     var plan: DietPlan
     var body: some View {
         CardShell {
@@ -261,8 +380,44 @@ private struct DietCardView: View {
                     }
                     .padding(.horizontal, 14).padding(.vertical, 9)
                 }
+                Divider().overlay(Theme.hairline)
+                SaveRow(save: "Save plan", view: "View in Eat",
+                        open: { store.selectedTab = .eat },
+                        secondary: ("Adjust", { store.coachDraft = "Adjust the diet plan: " }))
             }
         }
+    }
+}
+
+/// "Save" confirms a plan the tool already saved: it flips to a checked "Saved" state and offers a link to view it.
+private struct SaveRow: View {
+    var save: String
+    var view: String
+    var open: () -> Void
+    var secondary: (String, () -> Void)
+    @State private var saved = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.snappy) { saved = true }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } label: {
+                Label(saved ? "Saved" : save, systemImage: saved ? "checkmark.circle.fill" : "square.and.arrow.down")
+            }
+            .buttonStyle(BigButtonStyle(bg: saved ? Theme.fuel : Theme.ink))
+            .disabled(saved)
+            .accessibilityLabel(saved ? "Saved" : save)
+            if saved {
+                Button(view, action: open)
+                    .buttonStyle(BigButtonStyle(bg: .white, fg: Theme.ink, border: Theme.border))
+                    .transition(.opacity)
+            } else {
+                Button(secondary.0, action: secondary.1)
+                    .buttonStyle(BigButtonStyle(bg: .white, fg: Theme.ink, border: Theme.border))
+            }
+        }
+        .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 14)
     }
 }
 

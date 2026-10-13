@@ -44,6 +44,8 @@ class ProfileIn(Input):
 
 class ChatIn(Input):
     message: str = Field(min_length=1, max_length=8000)
+    # Optional meal photo (JPEG, base64). Sent to Claude for this turn only; never stored.
+    image_jpeg_base64: str | None = Field(default=None, max_length=7_000_000)
     request_id: UUID | None = None
     conversation_id: UUID | None = None
     plan_mode: Literal["save", "propose"] = "save"
@@ -123,6 +125,9 @@ class DietPlanIn(Input):
     kcal: int = Field(gt=0, le=15000)
     meals: list[DietMeal] = Field(min_length=1, max_length=20)
     replaces_plan_id: int | None = Field(default=None, gt=0)
+
+class StartWorkoutIn(Input):
+    workout_id: int = Field(gt=0)
 
 class LogSetIn(SetIn):
     exercise_name: Name

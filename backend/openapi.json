@@ -108,6 +108,18 @@
             ],
             "title": "Conversation Id"
           },
+          "image_jpeg_base64": {
+            "anyOf": [
+              {
+                "maxLength": 7000000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Jpeg Base64"
+          },
           "message": {
             "maxLength": 8000,
             "minLength": 1,
@@ -2146,6 +2158,68 @@
           }
         ],
         "summary": "Chat History"
+      }
+    },
+    "/chat/stream": {
+      "post": {
+        "description": "Same run as POST /chat, streamed as NDJSON lines: {\"type\": \"text\"|\"status\", \"text\"} while Milo works,\nthen {\"type\": \"done\", \"reply\", \"cards\"} (or {\"type\": \"error\", \"detail\"}). Replays return only \"done\".",
+        "operationId": "chat_stream_chat_stream_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Chat Stream"
       }
     },
     "/diet-plans": {

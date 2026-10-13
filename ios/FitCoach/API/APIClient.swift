@@ -17,6 +17,35 @@ actor APIClient {
     func patch<T: Decodable>(_ path: String, _ body: any Encodable) async throws -> T { try await send("PATCH", path, body) }
     func delete(_ path: String) async throws { let _: OK = try await send("DELETE", path, nil) }
 
+    /// POST /chat/stream: yields events as Milo writes. No retries (a replay would only return "done").
+    nonisolated func chatStream(_ body: ChatInput) -> AsyncThrowingStream<ChatEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+                    let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+                    var req = URLRequest(url: URL(string: "/chat/stream", relativeTo: Config.baseURL)!)
+                    req.httpMethod = "POST"
+                    req.timeoutInterval = 300
+                    req.httpBody = try encoder.encode(body)
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("Bearer \(Secrets.demoAPIToken)", forHTTPHeaderField: "Authorization")
+                    req.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                    guard (200..<300).contains(status) else { throw APIError(status: status, body: "chat stream failed") }
+                    for try await line in bytes.lines {
+                        if let event = try? decoder.decode(ChatEvent.self, from: Data(line.utf8)) { continuation.yield(event) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     private func send<T: Decodable>(_ method: String, _ path: String, _ body: (any Encodable)?) async throws -> T {
         let bodyData = try body.map { try encoder.encode($0) }
         if Config.useMock {

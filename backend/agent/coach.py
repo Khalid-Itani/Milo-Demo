@@ -19,12 +19,24 @@ MAX_ITERATIONS = 6
 MAX_TOOL_CALLS = 16
 MAX_SECONDS = 240
 
-def create_message(max_tokens=4096, **kwargs):
-    """Provider seam for offline tests. Production never falls back to a fake model."""
+TOOL_STATUS = {"log_food": "Logging food…", "log_workout_set": "Updating your workout…",
+               "create_workout_plan": "Building your plan…", "create_diet_plan": "Building your meal plan…",
+               "set_goal": "Saving your goal…"}
+
+def create_message(max_tokens=4096, on_text=None, **kwargs):
+    """Provider seam for offline tests. Production never falls back to a fake model.
+    With on_text, streams the reply and calls on_text(chunk) for each text delta."""
     if not settings.anthropic_api_key:
         raise RuntimeError("anthropic_not_configured")
+    if not settings.anthropic_model.startswith("claude-haiku"):  # Haiku has no effort control
+        kwargs["output_config"] = {"effort": "low"}  # chat turns: fast replies over deep reasoning
     with anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=35, max_retries=0) as client:
-        return client.messages.create(model=settings.anthropic_model, max_tokens=max_tokens, **kwargs)
+        if on_text is None:
+            return client.messages.create(model=settings.anthropic_model, max_tokens=max_tokens, **kwargs)
+        with client.messages.stream(model=settings.anthropic_model, max_tokens=max_tokens, **kwargs) as stream:
+            for chunk in stream.text_stream:
+                on_text(chunk)
+            return stream.get_final_message()
 
 def context_block(s):
     try:
@@ -92,7 +104,21 @@ def tool_effect(factory, id, token, name, args, mode):
             s.flush()
             return {"data": data}, card, fingerprint
 
-def run(factory, body, id, token):
+def with_image(messages, body, progress):
+    """Attach the meal photo to this turn's user message in-memory, so it never lands in the DB."""
+    i = progress.get("image_at", -1)
+    if not body.image_jpeg_base64 or not 0 <= i < len(messages) or messages[i]["role"] != "user":
+        return messages
+    out = list(messages)
+    out[i] = {"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": body.image_jpeg_base64}},
+        {"type": "text", "text": messages[i]["content"]}]}
+    return out
+
+
+def run(factory, body, id, token, emit=None):
+    """emit (optional) receives live events: {"type": "text"|"status", "text": ...}."""
+    stream = {"on_text": lambda t: emit({"type": "text", "text": t})} if emit else {}
     conversation = str(body.conversation_id) if body.conversation_id else None
     with factory() as s:
         with s.begin():
@@ -105,6 +131,7 @@ def run(factory, body, id, token):
                 s.flush()
                 progress = {"messages": history(s, conversation), "cards": [], "seen": [],
                             "iterations": 0, "calls": 0, "failed": False}
+                progress["image_at"] = len(progress["messages"]) - 1  # this turn's user message
                 row.progress = copy.deepcopy(progress)
                 s.add(row)
     started = time.monotonic()
@@ -120,7 +147,7 @@ def run(factory, body, id, token):
             with factory() as s:
                 system = SYSTEM_PROMPT+"\nPlan mode: "+body.plan_mode+"\n"+context_block(s)
             try:
-                response = create_message(system=system, tools=TOOLS, messages=messages)
+                response = create_message(system=system, tools=TOOLS, messages=with_image(messages, body, progress), **stream)
                 blocks = [block_dict(b) for b in response.content]
                 if len(blocks) > 32:
                     raise ValueError("Too many response blocks")
@@ -143,6 +170,8 @@ def run(factory, body, id, token):
                     raise ValueError("Oversized provider response")
                 messages.append({"role": "assistant", "content": blocks})
                 checkpoint(factory, id, token, progress)
+                if emit:  # text so far was a preamble to tool calls; clients replace it with a status
+                    emit({"type": "status", "text": TOOL_STATUS.get(uses[0].get("name"), "Checking your data…")})
             except (anthropic.APIError, RuntimeError, ValueError, TypeError, AttributeError):
                 provider_failed = True
                 break

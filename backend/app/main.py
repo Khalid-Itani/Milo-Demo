@@ -1,5 +1,8 @@
 """Authenticated legacy API plus additive sessions, proposals and scans."""
+import json
+import queue
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from datetime import date as Date
 from typing import Annotated
@@ -7,7 +10,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -94,6 +97,32 @@ def chat(body: sh.ChatIn, request: Request, key: Key = None):
     except Exception:
         release(factory(), id, lease)
         raise
+
+@api.post("/chat/stream")
+def chat_stream(body: sh.ChatIn, request: Request, key: Key = None):
+    """Same run as POST /chat, streamed as NDJSON lines: {"type": "text"|"status", "text"} while Milo works,
+    then {"type": "done", "reply", "cards"} (or {"type": "error", "detail"}). Replays return only "done"."""
+    key = key or (str(body.request_id) if body.request_id else "unkeyed:"+str(uuid4()))
+    fingerprint = digest({"method": "POST", "path": "/chat", "body": body.model_dump(mode="json")})
+    id, lease, result = claim(factory(), key, fingerprint)
+    done = lambda r: {"type": "done", **sh.ChatOut.model_validate(r).model_dump(mode="json", exclude_none=True)}
+    if lease is None:
+        return StreamingResponse(iter([json.dumps(done(result))+"\n"]), media_type="application/x-ndjson")
+    events = queue.Queue()
+    def work():
+        try:
+            events.put(done(coach.run(factory(), body, id, lease, emit=events.put)))
+        except Exception:
+            release(factory(), id, lease)
+            events.put({"type": "error", "detail": "chat_failed"})
+    threading.Thread(target=work, daemon=True).start()
+    def lines():
+        while True:
+            event = events.get()
+            yield json.dumps(event, default=str)+"\n"
+            if event["type"] in ("done", "error"):
+                return
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 @api.get("/chat/history", response_model=list[sh.ChatMessageOut], response_model_exclude_none=True)
 def chat_history(conversation_id: UUID | None = None):
